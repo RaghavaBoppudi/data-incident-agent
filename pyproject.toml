@@ -1,0 +1,16 @@
+[project]
+name = "data-incident-agent"
+version = "0.1.0"
+description = "Investigates dbt test failures and data incidents; includes the data.sf.gov snapshot monitor."
+requires-python = ">=3.12"
+dependencies = ["requests"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
