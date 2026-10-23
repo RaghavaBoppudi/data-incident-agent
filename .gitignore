@@ -1,0 +1,12 @@
+.DS_Store
+.env
+.venv/
+.venv.nosync/
+data/
+*.duckdb
+*.duckdb.wal
+__pycache__/
+.pytest_cache/
+warehouse/target/
+warehouse/logs/
+warehouse/dbt_packages/
