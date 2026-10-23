@@ -1,0 +1,108 @@
+name: snapshot
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+# Runs queue behind each other; GitHub keeps at most one pending run.
+concurrency:
+  group: snapshot-data
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # Read only by monitor.alert. The single staleness threshold.
+  STALE_AFTER_HOURS: "48"
+  # Staleness is skipped for these dataset names; errors still alert.
+  STALE_EXEMPT_DATASETS: mobile_food_permits
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          path: code
+
+      - name: Probe data branch
+        id: probe
+        working-directory: code
+        run: |
+          rc=0
+          git ls-remote --exit-code --heads origin data >/dev/null || rc=$?
+          case "$rc" in
+            0) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            2) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::git ls-remote failed with exit code $rc; not assuming the data branch is missing"
+               exit 1 ;;
+          esac
+
+      - name: Checkout data branch
+        if: steps.probe.outputs.exists == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: data
+          path: data
+          fetch-depth: 1
+
+      - name: Bootstrap data branch
+        if: steps.probe.outputs.exists == 'false'
+        uses: actions/checkout@v7
+        with:
+          path: data
+
+      - name: Make bootstrap branch orphan
+        if: steps.probe.outputs.exists == 'false'
+        working-directory: data
+        run: |
+          git checkout --orphan data
+          git rm -rf -q .
+          git clean -fdxq
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Install dependencies
+        working-directory: code
+        run: uv sync
+
+      # PYTHONPATH: package = false, so monitor/ and config/ are not installed.
+      # --project: cwd is data/, which has no pyproject.toml.
+      - name: Run monitor
+        id: monitor
+        working-directory: data
+        env:
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+        run: |
+          set +e
+          PYTHONPATH="$GITHUB_WORKSPACE/code" uv run --no-sync --project "$GITHUB_WORKSPACE/code" python -m monitor.monitor
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push snapshot
+        working-directory: data
+        run: |
+          if [ -d snapshots ]; then git add snapshots/; fi
+          if git diff --cached --quiet; then
+            echo "No snapshot changes to commit."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push origin HEAD:data
+
+      - name: Alert on unhealthy datasets
+        if: always() && steps.monitor.outcome != 'skipped'
+        working-directory: data
+        run: PYTHONPATH="$GITHUB_WORKSPACE/code" uv run --no-sync --project "$GITHUB_WORKSPACE/code" python -m monitor.alert
+
+      - name: Fail on monitor exit code
+        if: always() && steps.monitor.outputs.exit_code != '' && steps.monitor.outputs.exit_code != '0'
+        run: |
+          echo "::error::monitor exited with code ${{ steps.monitor.outputs.exit_code }}"
+          exit 1
